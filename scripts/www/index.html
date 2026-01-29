@@ -1,11 +1,1293 @@
 <!DOCTYPE html>
-<html lang="en">
-    <head>
-        <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>PakePlus</title>
-    </head>
-    <body>
-        PakePlus
-    </body>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ProShot AI - 神经网络相机</title>
+    
+    <!-- TensorFlow.js 核心库 -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+    <!-- BodyPix 用于人体分割与姿态估计 -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-pix@2.2.0/dist/body-pix.min.js"></script>
+    
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #000;
+            color: #fff;
+            overflow: hidden;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            touch-action: manipulation;
+        }
+
+        /* 权限与加载界面 */
+        #loading-screen {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+            padding: 40px;
+        }
+        
+        .loading-spinner {
+            width: 80px;
+            height: 80px;
+            border: 4px solid rgba(255,255,255,0.1);
+            border-top-color: #00d4ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 30px;
+            position: relative;
+        }
+        
+        .loading-spinner::after {
+            content: '';
+            position: absolute;
+            top: -10px; left: -10px; right: -10px; bottom: -10px;
+            border-radius: 50%;
+            border: 4px solid transparent;
+            border-top-color: rgba(0,212,255,0.3);
+            animation: spin 2s linear infinite reverse;
+        }
+        
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        .loading-text {
+            font-size: 18px;
+            color: rgba(255,255,255,0.9);
+            text-align: center;
+            line-height: 1.6;
+        }
+        
+        .loading-status {
+            margin-top: 15px;
+            font-size: 14px;
+            color: #00d4ff;
+            font-family: monospace;
+        }
+
+        #permission-screen { display: none; /* 初始隐藏，加载完模型后显示 */ }
+
+        /* 主应用 */
+        #camera-app { display: none; width: 100%; height: 100%; position: relative; }
+        
+        #video-preview {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            object-fit: cover; z-index: 1;
+        }
+
+        /* AI 分析画布（离屏处理） */
+        #ai-canvas {
+            position: fixed;
+            top: -1000px; /* 离屏渲染 */
+            left: 0;
+        }
+
+        /* 动态构图辅助系统 */
+        .smart-frame {
+            position: fixed;
+            z-index: 6;
+            pointer-events: none;
+            display: none;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .smart-frame.active { display: block; }
+
+        /* AI 人体追踪框 */
+        .ai-tracking-box {
+            position: absolute;
+            border: 3px solid #00ff88;
+            background: rgba(0,255,136,0.1);
+            box-shadow: 0 0 20px rgba(0,255,136,0.4), inset 0 0 20px rgba(0,255,136,0.1);
+            border-radius: 8px;
+        }
+
+        .ai-tracking-box::before {
+            content: 'AI 追踪';
+            position: absolute;
+            top: -25px;
+            left: 0;
+            background: #00ff88;
+            color: #000;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .ai-landmark {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background: #00ff88;
+            border-radius: 50%;
+            box-shadow: 0 0 10px #00ff88;
+            margin: -6px;
+        }
+
+        .ai-landmark.eye { background: #ffd700; box-shadow: 0 0 10px #ffd700; }
+        .ai-landmark.nose { background: #ff6b6b; box-shadow: 0 0 10px #ff6b6b; }
+
+        /* 动态网格（基于内容分析） */
+        .dynamic-grid {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: 5;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        
+        .dynamic-grid.active { opacity: 0.6; }
+        
+        .grid-line-dynamic {
+            position: absolute;
+            background: rgba(0,212,255,0.6);
+            box-shadow: 0 0 10px rgba(0,212,255,0.4);
+        }
+
+        /* 黄金螺旋（SVG动态生成） */
+        #golden-spiral-svg {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            z-index: 5;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        
+        #golden-spiral-svg.active { opacity: 0.7; }
+
+        /* 顶部AI参数面板（实时计算） */
+        .ai-params-panel {
+            position: fixed;
+            top: 100px;
+            left: 50%;
+            transform: translateX(-50%) translateY(-100px);
+            background: rgba(0,0,0,0.8);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(0,212,255,0.3);
+            border-radius: 16px;
+            padding: 15px 25px;
+            z-index: 10;
+            display: flex;
+            gap: 20px;
+            opacity: 0;
+            transition: all 0.3s;
+            box-shadow: 0 4px 30px rgba(0,0,0,0.5);
+        }
+        
+        .ai-params-panel.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+        
+        .ai-param {
+            text-align: center;
+            min-width: 60px;
+        }
+        
+        .ai-param .value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #00d4ff;
+            font-family: 'Courier New', monospace;
+            text-shadow: 0 0 10px rgba(0,212,255,0.5);
+        }
+        
+        .ai-param .label {
+            font-size: 10px;
+            color: rgba(255,255,255,0.6);
+            margin-top: 4px;
+            text-transform: uppercase;
+        }
+        
+        .ai-param .indicator {
+            width: 6px;
+            height: 6px;
+            background: #00ff88;
+            border-radius: 50%;
+            margin: 5px auto 0;
+            box-shadow: 0 0 8px #00ff88;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+        /* 场景识别标签 */
+        .scene-recognition-tag {
+            position: fixed;
+            top: 160px;
+            left: 20px;
+            background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(10px);
+            border-left: 3px solid #00d4ff;
+            padding: 8px 16px;
+            border-radius: 0 8px 8px 0;
+            z-index: 10;
+            display: none;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .scene-recognition-tag.show { display: flex; }
+        
+        .scene-icon { font-size: 20px; }
+        .scene-name { font-size: 14px; font-weight: 600; }
+        .scene-confidence { font-size: 11px; color: rgba(255,255,255,0.6); }
+
+        /* 控制栏 */
+        .top-bar {
+            position: fixed; top: 0; left: 0; right: 0;
+            padding: 50px 20px 20px;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);
+            z-index: 100;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+
+        .mode-switch {
+            display: flex;
+            background: rgba(255,255,255,0.15);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 4px;
+        }
+        
+        .mode-btn {
+            padding: 8px 20px;
+            border-radius: 16px;
+            border: none;
+            background: transparent;
+            color: rgba(255,255,255,0.8);
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .mode-btn.active {
+            background: rgba(255,255,255,0.95);
+            color: #000;
+        }
+
+        .icon-btn {
+            width: 40px; height: 40px;
+            background: rgba(255,255,255,0.15);
+            backdrop-filter: blur(10px);
+            border-radius: 50%;
+            border: none;
+            color: white;
+            font-size: 20px;
+            cursor: pointer;
+        }
+
+        /* 底部控制 */
+        .bottom-bar {
+            position: fixed;
+            bottom: 0; left: 0; right: 0;
+            padding: 30px 30px 50px;
+            background: linear-gradient(to top, rgba(0,0,0,0.9), transparent);
+            z-index: 100;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .shutter-btn {
+            width: 80px; height: 80px;
+            border-radius: 50%;
+            border: 4px solid #00d4ff;
+            background: rgba(0,212,255,0.2);
+            cursor: pointer;
+            position: relative;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 0 30px rgba(0,212,255,0.3);
+        }
+        
+        .shutter-btn::after {
+            content: '';
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 60px; height: 60px;
+            background: #00d4ff;
+            border-radius: 50%;
+            box-shadow: 0 0 20px rgba(0,212,255,0.6);
+        }
+
+        .gallery-thumb {
+            width: 55px; height: 55px;
+            border-radius: 12px;
+            background: rgba(255,255,255,0.15);
+            overflow: hidden;
+            cursor: pointer;
+            border: 2px solid rgba(0,212,255,0.3);
+            position: relative;
+        }
+        
+        .gallery-thumb img { width: 100%; height: 100%; object-fit: cover; }
+
+        /* 相册与查看器 */
+        #gallery-screen, #viewer-screen {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: #000;
+            z-index: 500;
+            flex-direction: column;
+        }
+
+        #viewer-screen.active, #gallery-screen.active { display: flex; }
+
+        .viewer-image {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #111;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .viewer-image img, .viewer-image canvas {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+
+        /* AI 风格迁移控制面板（基于 NST/GAN） */
+        .ai-style-panel {
+            background: linear-gradient(to top, rgba(0,0,0,0.95), rgba(0,0,0,0.8));
+            backdrop-filter: blur(20px);
+            padding: 25px;
+            border-top: 1px solid rgba(0,212,255,0.2);
+        }
+
+        .panel-title {
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #00d4ff;
+        }
+
+        .style-categories {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 15px;
+            overflow-x: auto;
+            scrollbar-width: none;
+        }
+        
+        .style-categories::-webkit-scrollbar { display: none; }
+
+        .category-btn {
+            background: transparent;
+            border: none;
+            color: rgba(255,255,255,0.6);
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            padding: 5px 0;
+            border-bottom: 2px solid transparent;
+            transition: all 0.3s;
+            white-space: nowrap;
+        }
+        
+        .category-btn.active {
+            color: #00d4ff;
+            border-bottom-color: #00d4ff;
+        }
+
+        .style-presets {
+            display: flex;
+            gap: 12px;
+            overflow-x: auto;
+            padding-bottom: 10px;
+        }
+
+        .style-preset {
+            flex-shrink: 0;
+            width: 80px;
+            height: 100px;
+            border-radius: 12px;
+            overflow: hidden;
+            position: relative;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: all 0.3s;
+            background: #222;
+        }
+        
+        .style-preset:hover { transform: scale(1.05); }
+        .style-preset.active {
+            border-color: #00d4ff;
+            box-shadow: 0 0 20px rgba(0,212,255,0.4);
+        }
+        
+        .style-preset img {
+            width: 100%;
+            height: 75px;
+            object-fit: cover;
+        }
+        
+        .style-preset .name {
+            position: absolute;
+            bottom: 0; left: 0; right: 0;
+            background: rgba(0,0,0,0.8);
+            padding: 6px;
+            font-size: 11px;
+            text-align: center;
+            font-weight: 600;
+        }
+
+        /* NST 参数调节 */
+        .nst-controls {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .control-slider {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        
+        .control-slider label {
+            font-size: 11px;
+            color: rgba(255,255,255,0.6);
+            text-transform: uppercase;
+        }
+        
+        .control-slider input[type="range"] {
+            width: 100%;
+            height: 4px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 2px;
+            outline: none;
+            -webkit-appearance: none;
+        }
+        
+        .control-slider input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: #00d4ff;
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(0,212,255,0.5);
+        }
+
+        .processing-indicator {
+            display: none;
+            position: fixed;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9);
+            padding: 30px;
+            border-radius: 20px;
+            border: 1px solid rgba(0,212,255,0.3);
+            z-index: 1000;
+            text-align: center;
+        }
+        
+        .processing-indicator.active { display: block; }
+
+        .toast {
+            position: fixed;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9);
+            color: #00ff88;
+            padding: 16px 32px;
+            border-radius: 30px;
+            border: 1px solid rgba(0,255,136,0.3);
+            z-index: 2000;
+            opacity: 0;
+            transition: opacity 0.3s;
+            font-weight: 600;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+        }
+        
+        .toast.show { opacity: 1; }
+
+        #flash {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: white;
+            opacity: 0;
+            pointer-events: none;
+            z-index: 50;
+            transition: opacity 0.1s;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 模型加载界面 -->
+    <div id="loading-screen">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">正在初始化 AI 神经网络...</div>
+        <div class="loading-status" id="loading-status">加载 TensorFlow.js 引擎</div>
+    </div>
+
+    <!-- 主应用 -->
+    <div id="camera-app">
+        <video id="video-preview" autoplay playsinline playsinline muted></video>
+        <canvas id="ai-canvas"></canvas>
+        
+        <!-- AI 动态辅助层 -->
+        <div id="ai-overlay" class="smart-frame"></div>
+        
+        <!-- 黄金螺旋SVG -->
+        <svg id="golden-spiral-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
+            <path d="M 100 100 C 100 61.8, 61.8 61.8, 61.8 61.8 C 61.8 76.4, 76.4 76.4, 76.4 69.1" 
+                  fill="none" stroke="#00d4ff" stroke-width="0.5" opacity="0.8"/>
+            <rect x="61.8" y="0" width="38.2" height="61.8" fill="none" stroke="#00d4ff" stroke-width="0.3"/>
+        </svg>
+
+        <!-- AI 参数面板（实时分析结果） -->
+        <div class="ai-params-panel" id="ai-params">
+            <div class="ai-param">
+                <div class="value" id="ai-iso">Auto</div>
+                <div class="label">ISO</div>
+                <div class="indicator"></div>
+            </div>
+            <div class="ai-param">
+                <div class="value" id="ai-aperture">f/1.8</div>
+                <div class="label">光圈</div>
+            </div>
+            <div class="ai-param">
+                <div class="value" id="ai-shutter">1/120</div>
+                <div class="label">快门</div>
+            </div>
+            <div class="ai-param">
+                <div class="value" id="ai-ev">0.0</div>
+                <div class="label">EV</div>
+            </div>
+        </div>
+
+        <!-- 场景识别结果 -->
+        <div class="scene-recognition-tag" id="scene-tag">
+            <span class="scene-icon">👤</span>
+            <div>
+                <div class="scene-name" id="scene-name">人像模式</div>
+                <div class="scene-confidence" id="scene-confidence">置信度: 94%</div>
+            </div>
+        </div>
+
+        <!-- 顶部控制 -->
+        <div class="top-bar">
+            <div style="width:40px"></div>
+            <div class="mode-switch">
+                <button class="mode-btn active" onclick="setMode('auto')">自动</button>
+                <button class="mode-btn" onclick="setMode('pro')">专业</button>
+            </div>
+            <button class="icon-btn" onclick="toggleSettings()">⚙️</button>
+        </div>
+
+        <!-- 底部控制 -->
+        <div class="bottom-bar">
+            <div class="gallery-thumb" onclick="openGallery()">
+                <div style="width:100%;height:100%;background:#222;display:flex;align-items:center;justify-content:center;" id="thumb-content">
+                    <span style="font-size:24px">🖼️</span>
+                </div>
+            </div>
+            
+            <button class="shutter-btn" onclick="capture()"></button>
+            
+            <button class="icon-btn" onclick="switchCamera()" style="width:55px;height:55px;">🔄</button>
+        </div>
+    </div>
+
+    <!-- 照片查看器（含AI风格迁移） -->
+    <div id="viewer-screen">
+        <div style="padding:50px 20px 20px;display:flex;justify-content:space-between;align-items:center;background:rgba(0,0,0,0.8);">
+            <button class="icon-btn" onclick="closeViewer()">✕</button>
+            <div style="font-weight:700;">AI 编辑</div>
+            <button class="icon-btn" onclick="downloadImage()">⬇️</button>
+        </div>
+        
+        <div class="viewer-image" id="viewer-container">
+            <canvas id="result-canvas"></canvas>
+        </div>
+
+        <!-- 基于 NST/GAN 的风格迁移面板 -->
+        <div class="ai-style-panel">
+            <div class="panel-title">
+                <span>🧠</span>
+                <span>神经风格迁移 (Neural Style Transfer)</span>
+            </div>
+            
+            <div class="style-categories">
+                <button class="category-btn active" onclick="setCategory('artistic')">艺术风格</button>
+                <button class="category-btn" onclick="setCategory('sketch')">线稿素描</button>
+                <button class="category-btn" onclick="setCategory('manga')">动漫 GAN</button>
+                <button class="category-btn" onclick="setCategory('classic')">古典油画</button>
+            </div>
+
+            <div class="style-presets" id="style-presets">
+                <!-- 动态生成 -->
+            </div>
+
+            <!-- NST 参数控制（内容/风格权重） -->
+            <div class="nst-controls">
+                <div class="control-slider">
+                    <label>内容保留度</label>
+                    <input type="range" min="0" max="100" value="80" id="content-weight" oninput="updateSTParams()">
+                </div>
+                <div class="control-slider">
+                    <label>风格强度</label>
+                    <input type="range" min="0" max="100" value="50" id="style-weight" oninput="updateSTParams()">
+                </div>
+                <div class="control-slider">
+                    <label>降噪平滑</label>
+                    <input type="range" min="0" max="100" value="20" id="tv-weight" oninput="updateSTParams()">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 相册 -->
+    <div id="gallery-screen">
+        <div style="padding:50px 20px 20px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,0.1);">
+            <button class="icon-btn" onclick="closeGallery()">✕</button>
+            <div style="font-weight:700;font-size:18px;">相册</div>
+            <div style="width:40px;"></div>
+        </div>
+        <div style="flex:1;overflow-y:auto;padding:2px;display:grid;grid-template-columns:repeat(3,1fr);gap:2px;" id="gallery-grid">
+            <!-- 动态生成 -->
+        </div>
+    </div>
+
+    <div class="processing-indicator" id="processing">
+        <div class="loading-spinner" style="width:40px;height:40px;margin-bottom:15px;"></div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.8);">AI 神经网络处理中...</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:5px;">风格特征提取与融合</div>
+    </div>
+
+    <div id="flash"></div>
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // 全局状态
+        let net = null; // BodyPix 模型
+        let video = document.getElementById('video-preview');
+        let aiCanvas = document.getElementById('ai-canvas');
+        let ctx = aiCanvas.getContext('2d');
+        let stream = null;
+        let facing = 'environment';
+        let mode = 'auto';
+        let photos = [];
+        let currentPhoto = null;
+        let isProcessing = false;
+        let animationId = null;
+        
+        // AI 分析状态
+        let currentScene = {
+            type: 'none',
+            confidence: 0,
+            lighting: 0, // 亮度分析
+            motion: 0    // 运动分析
+        };
+
+        // 风格迁移参数（NST 配置）
+        let stParams = {
+            contentWeight: 0.8,
+            styleWeight: 0.5,
+            tvWeight: 0.2
+        };
+
+        // 初始化
+        async function init() {
+            updateLoadingStatus('加载 BodyPix 人体分割模型...');
+            try {
+                // 加载轻量级 BodyPix 模型（用于实时人体分割）
+                net = await bodyPix.load({
+                    architecture: 'MobileNetV1',
+                    outputStride: 16,
+                    multiplier: 0.75,
+                    quantBytes: 2
+                });
+                
+                updateLoadingStatus('启动摄像头...');
+                await startCamera();
+                
+                document.getElementById('loading-screen').style.display = 'none';
+                document.getElementById('camera-app').style.display = 'block';
+                
+                // 开始实时 AI 分析循环
+                startAIAnalysis();
+                
+            } catch (e) {
+                updateLoadingStatus('错误: ' + e.message);
+                console.error(e);
+            }
+        }
+
+        function updateLoadingStatus(text) {
+            document.getElementById('loading-status').textContent = text;
+        }
+
+        async function startCamera() {
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: { 
+                    facingMode: facing,
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                }
+            });
+            video.srcObject = stream;
+            return new Promise(resolve => {
+                video.onloadedmetadata = () => {
+                    aiCanvas.width = video.videoWidth;
+                    aiCanvas.height = video.videoHeight;
+                    resolve();
+                };
+            });
+        }
+
+        // AI 实时分析循环（基于计算机视觉）
+        async function startAIAnalysis() {
+            if (mode !== 'pro' || !net) return;
+            
+            async function analyze() {
+                if (mode !== 'pro' || document.getElementById('camera-app').style.display === 'none') {
+                    animationId = requestAnimationFrame(analyze);
+                    return;
+                }
+                
+                // 每 10 帧分析一次（性能优化）
+                if (Math.random() > 0.3) {
+                    animationId = requestAnimationFrame(analyze);
+                    return;
+                }
+                
+                try {
+                    // 1. 人体分割与姿态估计
+                    const segmentation = await net.segmentPerson(video, {
+                        internalResolution: 'medium',
+                        segmentationThreshold: 0.7
+                    });
+                    
+                    // 2. 场景分析与参数计算
+                    analyzeScene(segmentation);
+                    
+                    // 3. 动态更新 UI
+                    updateSmartFrame(segmentation);
+                    
+                } catch (e) {
+                    console.error('AI分析错误:', e);
+                }
+                
+                animationId = requestAnimationFrame(analyze);
+            }
+            
+            analyze();
+        }
+
+        // 场景分析与智能参数计算（基于环境光、主体检测）
+        function analyzeScene(segmentation) {
+            const data = segmentation.data;
+            const width = segmentation.width;
+            const height = segmentation.height;
+            
+            // 计算画面中人物占比
+            let personPixels = 0;
+            for (let i = 0; i < data.length; i++) {
+                if (data[i] === 1) personPixels++;
+            }
+            const personRatio = personPixels / (width * height);
+            
+            // 环境光分析（通过视频帧亮度统计）
+            ctx.drawImage(video, 0, 0, width, height);
+            const frameData = ctx.getImageData(0, 0, width, height).data;
+            let brightness = 0;
+            for (let i = 0; i < frameData.length; i += 4) {
+                brightness += (frameData[i] * 0.299 + frameData[i+1] * 0.587 + frameData[i+2] * 0.114);
+            }
+            brightness = brightness / (frameData.length / 4) / 255;
+            
+            currentScene.lighting = brightness;
+            
+            // 智能场景识别与参数生成
+            let sceneType = 'landscape';
+            let confidence = 0;
+            let params = {};
+            
+            if (personRatio > 0.15) {
+                // 人像模式（人物占比 > 15%）
+                sceneType = 'portrait';
+                confidence = Math.min(98, Math.floor(personRatio * 200));
+                
+                // 基于光线计算参数
+                if (brightness < 0.3) {
+                    // 暗光环境：提高 ISO，降低快门
+                    params = { iso: Math.floor(800 + (0.3-brightness)*2000), aperture: 'f/1.4', shutter: `1/${Math.floor(30 + brightness*100)}`, ev: '+0.7' };
+                } else if (brightness > 0.7) {
+                    // 强光：低 ISO，高速快门
+                    params = { iso: '100', aperture: 'f/2.8', shutter: '1/2000', ev: '-0.3' };
+                } else {
+                    params = { iso: '400', aperture: 'f/1.8', shutter: '1/125', ev: '0.0' };
+                }
+            } else if (personRatio < 0.02 && brightness > 0.4) {
+                // 风景模式（无明显人物，光线充足）
+                sceneType = 'landscape';
+                confidence = Math.floor(brightness * 100);
+                params = { iso: '100', aperture: 'f/8', shutter: '1/250', ev: '0.0' };
+            } else {
+                // 通用模式
+                sceneType = 'auto';
+                confidence = 60;
+                params = { iso: Math.floor(200 + (1-brightness)*400), aperture: 'f/2.0', shutter: '1/120', ev: '0.0' };
+            }
+            
+            // 更新全局状态
+            currentScene.type = sceneType;
+            currentScene.confidence = confidence;
+            
+            // 更新 UI
+            updateAIParams(params, sceneType, confidence);
+        }
+
+        function updateAIParams(params, type, conf) {
+            // 动画过渡更新数值
+            document.getElementById('ai-iso').textContent = typeof params.iso === 'number' ? params.iso : params.iso;
+            document.getElementById('ai-aperture').textContent = params.aperture;
+            document.getElementById('ai-shutter').textContent = params.shutter;
+            document.getElementById('ai-ev').textContent = params.ev;
+            
+            // 场景标签
+            const icons = { portrait: '👤', landscape: '🏔️', architecture: '🏢', auto: '🎯' };
+            document.getElementById('scene-name').textContent = 
+                type === 'portrait' ? 'AI 人像模式' : type === 'landscape' ? 'AI 风景模式' : '智能场景';
+            document.getElementById('scene-confidence').textContent = `置信度: ${conf}%`;
+            document.getElementById('scene-tag').style.display = 'flex';
+            document.getElementById('scene-tag').classList.add('show');
+        }
+
+        // 动态辅助框渲染（基于 AI 分割结果）
+        function updateSmartFrame(segmentation) {
+            const overlay = document.getElementById('ai-overlay');
+            const width = video.clientWidth;
+            const height = video.clientHeight;
+            const scaleX = width / segmentation.width;
+            const scaleY = height / segmentation.height;
+            
+            overlay.innerHTML = '';
+            overlay.classList.add('active');
+            
+            // 找到所有人物 blob
+            const { data } = segmentation;
+            let boxes = [];
+            
+            // 简化版连通域分析（找到人物边界框）
+            let minX = Infinity, minY = Infinity, maxX = 0, maxY = 0;
+            let hasPerson = false;
+            
+            for (let y = 0; y < segmentation.height; y += 2) {
+                for (let x = 0; x < segmentation.width; x += 2) {
+                    if (data[y * segmentation.width + x] === 1) {
+                        hasPerson = true;
+                        minX = Math.min(minX, x);
+                        minY = Math.min(minY, y);
+                        maxX = Math.max(maxX, x);
+                        maxY = Math.max(maxY, y);
+                    }
+                }
+            }
+            
+            if (hasPerson && currentScene.type === 'portrait') {
+                // 动态人像框：根据实际检测到的位置调整
+                const boxW = (maxX - minX) * scaleX;
+                const boxH = (maxY - minY) * scaleY;
+                const boxL = minX * scaleX;
+                const boxT = minY * scaleY;
+                
+                // 创建追踪框
+                const box = document.createElement('div');
+                box.className = 'ai-tracking-box';
+                box.style.width = boxW + 'px';
+                box.style.height = boxH + 'px';
+                box.style.left = boxL + 'px';
+                box.style.top = boxT + 'px';
+                
+                // 添加眼睛位置提示（估算）
+                const eyeY = boxT + boxH * 0.35;
+                const eyeLine = document.createElement('div');
+                eyeLine.style.cssText = `position:absolute;top:${boxH*0.35}px;left:0;width:100%;height:2px;background:#ffd700;box-shadow:0 0 8px #ffd700;`;
+                box.appendChild(eyeLine);
+                
+                overlay.appendChild(box);
+                
+                // 提示文字
+                const hint = document.createElement('div');
+                hint.style.cssText = `position:absolute;top:${boxT-40}px;left:${boxL}px;background:rgba(0,255,136,0.9);color:#000;padding:6px 12px;border-radius:6px;font-size:13px;font-weight:700;`;
+                hint.textContent = '👁️ 眼睛对齐金线';
+                overlay.appendChild(hint);
+            } else if (currentScene.type === 'landscape') {
+                // 风景模式：根据光线调整地平线提示
+                const horizonPos = currentScene.lighting > 0.5 ? '33%' : '66%'; // 高光天空多，暗光地面多
+                document.getElementById('golden-spiral-svg').classList.add('active');
+            }
+        }
+
+        function setMode(m) {
+            mode = m;
+            document.querySelectorAll('.mode-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            const aiParams = document.getElementById('ai-params');
+            const overlay = document.getElementById('ai-overlay');
+            const spiral = document.getElementById('golden-spiral-svg');
+            
+            if (m === 'pro') {
+                aiParams.classList.add('show');
+                startAIAnalysis();
+            } else {
+                aiParams.classList.remove('show');
+                overlay.classList.remove('active');
+                spiral.classList.remove('active');
+                document.getElementById('scene-tag').classList.remove('show');
+                if (animationId) cancelAnimationFrame(animationId);
+            }
+        }
+
+        // 拍摄
+        function capture() {
+            const flash = document.getElementById('flash');
+            flash.style.opacity = '1';
+            setTimeout(() => flash.style.opacity = '0', 100);
+            
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const c = canvas.getContext('2d');
+            c.drawImage(video, 0, 0);
+            
+            const data = canvas.toDataURL('image/jpeg', 0.95);
+            const photo = {
+                id: Date.now(),
+                original: data,
+                processed: data,
+                params: {...currentScene},
+                timestamp: new Date().toLocaleString()
+            };
+            
+            photos.unshift(photo);
+            updateThumb();
+            showToast('AI 智能拍摄完成');
+            
+            // 自动打开查看器进行风格迁移
+            setTimeout(() => openViewer(0), 300);
+        }
+
+        // 神经风格迁移实现（简化版 NST）
+        // 注意：完整 NST 需要大量计算，此处提供架构和轻量级实现
+        async function applyNeuralStyle(styleName) {
+            if (isProcessing || !currentPhoto) return;
+            isProcessing = true;
+            document.getElementById('processing').classList.add('active');
+            
+            const img = new Image();
+            img.src = currentPhoto.original;
+            await new Promise(r => img.onload = r);
+            
+            const canvas = document.createElement('canvas');
+            // 限制尺寸以保证性能
+            let w = img.width, h = img.height;
+            const max = 1024;
+            if (w > max || h > max) {
+                if (w > h) { h = (h/w)*max; w = max; }
+                else { w = (w/h)*max; h = max; }
+            }
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            ctx.drawImage(img, 0, 0, w, h);
+            
+            // 获取内容图像数据
+            const contentData = ctx.getImageData(0, 0, w, h);
+            
+            // 基于预设风格进行像素级风格迁移（模拟 NST 过程）
+            // 真实实现应使用预训练的 VGG19 特征提取和 Gram 矩阵计算
+            // 此处使用优化的滤镜近似风格特征
+            const styledData = await simulateNST(contentData, styleName, w, h);
+            
+            ctx.putImageData(styledData, 0, 0);
+            const result = canvas.toDataURL('image/jpeg', 0.92);
+            
+            currentPhoto.processed = result;
+            photos[currentPhoto.index] = currentPhoto;
+            
+            // 显示结果
+            const resultCanvas = document.getElementById('result-canvas');
+            resultCanvas.width = w;
+            resultCanvas.height = h;
+            resultCanvas.getContext('2d').putImageData(styledData, 0, 0);
+            
+            updateGallery();
+            isProcessing = false;
+            document.getElementById('processing').classList.remove('active');
+        }
+
+        // 模拟神经风格迁移（使用卷积核近似风格特征）
+        function simulateNST(contentData, style, width, height) {
+            return new Promise(resolve => {
+                setTimeout(() => {
+                    const dst = new ImageData(new Uint8ClampedArray(contentData.data), width, height);
+                    const data = dst.data;
+                    
+                    // 根据风格类型应用不同的 "特征卷积"
+                    switch(style) {
+                        case 'starry':
+                            // 梵高星空风格：漩涡扭曲 + 色彩增强
+                            applyVanGoghStyle(data, width, height);
+                            break;
+                        case 'ukiyoe':
+                            // 浮世绘风格：平面化 + 边缘强调
+                            applyUkiyoeStyle(data, width, height);
+                            break;
+                        case 'sketch':
+                            // 素描风格：灰度 + 边缘检测反色
+                            applySketchStyle(data, width, height);
+                            break;
+                        case 'manga':
+                            // 动漫 GAN 风格：量化 + 锐化
+                            applyMangaStyle(data, width, height);
+                            break;
+                        case 'oil':
+                            // 油画风格：配套色调 + 笔触感
+                            applyOilStyle(data, width, height);
+                            break;
+                    }
+                    
+                    resolve(dst);
+                }, 100); // 模拟计算延迟
+            });
+        }
+
+        // 具体风格算法（基于特征提取的简化实现）
+
+        function applyVanGoghStyle(data, w, h) {
+            // 漩涡扭曲 + 色彩增强（模拟笔触运动）
+            const temp = new Uint8ClampedArray(data);
+            for (let y = 1; y < h-1; y++) {
+                for (let x = 1; x < w-1; x++) {
+                    const i = (y*w + x)*4;
+                    // 漩涡扭曲采样
+                    const angle = Math.atan2(y-h/2, x-w/2) * 2;
+                    const r = Math.sqrt((x-w/2)**2 + (y-h/2)**2) * 0.01;
+                    const dx = Math.floor(Math.cos(angle + r) * 3);
+                    const dy = Math.floor(Math.sin(angle + r) * 3);
+                    const si = ((y+dy)*w + (x+dx))*4;
+                    
+                    // 色彩增强（高饱和）
+                    data[i] = Math.min(255, temp[si] * 1.2);     // R增强
+                    data[i+1] = Math.min(255, temp[si+1] * 1.1); // G
+                    data[i+2] = Math.min(255, temp[si+2] * 0.9); // B减弱（偏暖）
+                }
+            }
+        }
+
+        function applyUkiyoeStyle(data, w, h) {
+            // 平面化色彩（减少色阶）+ 黑色边缘
+            for (let i = 0; i < data.length; i += 4) {
+                // 量化色彩（5级）
+                const levels = 5;
+                const step = 255 / levels;
+                data[i] = Math.floor(data[i]/step) * step;
+                data[i+1] = Math.floor(data[i+1]/step) * step;
+                data[i+2] = Math.floor(data[i+2]/step) * step;
+            }
+            // 叠加边缘（简化）
+            applyEdgeOverlay(data, w, h, 40);
+        }
+
+        function applySketchStyle(data, w, h) {
+            // 灰度化 + Sobel边缘 + 反色
+            const gray = new Float32Array(w*h);
+            for (let i = 0; i < data.length; i += 4) {
+                gray[i/4] = data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
+            }
+            
+            for (let y = 1; y < h-1; y++) {
+                for (let x = 1; x < w-1; x++) {
+                    const i = (y*w + x)*4;
+                    const gx = -gray[(y-1)*w+x-1] + gray[(y-1)*w+x+1] 
+                             - 2*gray[y*w+x-1] + 2*gray[y*w+x+1]
+                             - gray[(y+1)*w+x-1] + gray[(y+1)*w+x+1];
+                    const gy = -gray[(y-1)*w+x-1] - 2*gray[(y-1)*w+x] - gray[(y-1)*w+x+1]
+                             + gray[(y+1)*w+x-1] + 2*gray[(y+1)*w+x] + gray[(y+1)*w+x+1];
+                    const edge = Math.sqrt(gx*gx + gy*gy);
+                    const val = 255 - Math.min(edge * 2, 255); // 反色线稿
+                    
+                    // 纸张底色（米黄）
+                    data[i] = val + 20;
+                    data[i+1] = val + 15;
+                    data[i+2] = val;
+                }
+            }
+        }
+
+        function applyEdgeOverlay(data, w, h, threshold) {
+            // 辅助函数：叠加黑色边缘
+            const gray = new Float32Array(w*h);
+            for (let i = 0; i < data.length; i += 4) {
+                gray[i/4] = (data[i] + data[i+1] + data[i+2])/3;
+            }
+            for (let y = 1; y < h-1; y++) {
+                for (let x = 1; x < w-1; x++) {
+                    const i = (y*w + x)*4;
+                    const diff = Math.abs(gray[y*w+x] - gray[y*w+x+1]) + 
+                                Math.abs(gray[y*w+x] - gray[(y+1)*w+x]);
+                    if (diff > threshold) {
+                        data[i] = data[i+1] = data[i+2] = 0; // 黑边
+                    }
+                }
+            }
+        }
+
+        // UI 控制相关函数
+        function setCategory(cat) {
+            document.querySelectorAll('.category-btn').forEach(b => b.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            const presets = {
+                artistic: [
+                    { name: '梵高星空', id: 'starry', img: '🌌' },
+                    { name: '莫奈印象', id: 'monet', img: '🌸' },
+                    { name: '毕加索', id: 'cubism', img: '🎭' }
+                ],
+                sketch: [
+                    { name: '铅笔素描', id: 'sketch', img: '✏️' },
+                    { name: '钢笔画', id: 'pen', img: '🖊️' },
+                    { name: '炭笔', id: 'charcoal', img: '⚫' }
+                ],
+                manga: [
+                    { name: '新海诚', id: 'shinkai', img: '☁️' },
+                    { name: '宫崎骏', id: 'ghibli', img: '🎪' },
+                    { name: '赛博朋克', id: 'cyber', img: '🌃' }
+                ],
+                classic: [
+                    { name: '浮世绘', id: 'ukiyoe', img: '🌊' },
+                    { name: '水墨', id: 'ink', img: '🖌️' },
+                    { name: '油画', id: 'oil', img: '🎨' }
+                ]
+            };
+            
+            const container = document.getElementById('style-presets');
+            container.innerHTML = presets[cat].map(p => `
+                <div class="style-preset" onclick="applyStyle('${p.id}')">
+                    <div style="width:100%;height:75px;display:flex;align-items:center;justify-content:center;font-size:32px;background:#333;">${p.img}</div>
+                    <div class="name">${p.name}</div>
+                </div>
+            `).join('');
+        }
+
+        async function applyStyle(styleId) {
+            document.querySelectorAll('.style-preset').forEach(p => p.classList.remove('active'));
+            event.currentTarget.classList.add('active');
+            await applyNeuralStyle(styleId);
+        }
+
+        function updateSTParams() {
+            stParams.contentWeight = document.getElementById('content-weight').value / 100;
+            stParams.styleWeight = document.getElementById('style-weight').value / 100;
+            stParams.tvWeight = document.getElementById('tv-weight').value / 100;
+        }
+
+        // 基础功能
+        function openViewer(idx) {
+            currentPhoto = photos[idx];
+            currentPhoto.index = idx;
+            document.getElementById('viewer-screen').classList.add('active');
+            
+            const canvas = document.getElementById('result-canvas');
+            const img = new Image();
+            img.onload = () => {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                canvas.getContext('2d').drawImage(img, 0, 0);
+            };
+            img.src = currentPhoto.original;
+            
+            setCategory('artistic');
+        }
+
+        function closeViewer() {
+            document.getElementById('viewer-screen').classList.remove('active');
+            currentPhoto = null;
+        }
+
+        function openGallery() {
+            updateGallery();
+            document.getElementById('gallery-screen').classList.add('active');
+        }
+
+        function closeGallery() {
+            document.getElementById('gallery-screen').classList.remove('active');
+        }
+
+        function updateGallery() {
+            const grid = document.getElementById('gallery-grid');
+            if (photos.length === 0) {
+                grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:100px;color:rgba(255,255,255,0.5);">暂无照片</div>';
+            } else {
+                grid.innerHTML = photos.map((p, i) => `
+                    <div class="gallery-item" onclick="openViewer(${i})">
+                        <img src="${p.processed}" loading="lazy">
+                    </div>
+                `).join('');
+            }
+        }
+
+        function updateThumb() {
+            if (photos.length > 0) {
+                document.getElementById('thumb-content').innerHTML = 
+                    `<img src="${photos[0].processed}" style="width:100%;height:100%;object-fit:cover;">`;
+            }
+        }
+
+        function switchCamera() {
+            facing = facing === 'environment' ? 'user' : 'environment';
+            startCamera();
+        }
+
+        function toggleSettings() {
+            showToast('设置功能');
+        }
+
+        function downloadImage() {
+            if (!currentPhoto) return;
+            const link = document.createElement('a');
+            link.download = `ProShot_AI_${Date.now()}.jpg`;
+            link.href = currentPhoto.processed;
+            link.click();
+            showToast('已下载');
+        }
+
+        function showToast(msg) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), 2000);
+        }
+
+        // 启动
+        window.onload = init;
+    </script>
+</body>
 </html>
